@@ -1,24 +1,21 @@
-# SAM 3 Embedding Extraction
+# SAM 3 Image Embedding Extraction
 
-This directory contains tools for extracting embeddings from the SAM 3 (Segment Anything with Concepts) model. You can extract text embeddings, visual embeddings, or combined embeddings with detection results.
+This directory contains tools for extracting **image embeddings** from the SAM 3 (Segment Anything with Concepts) model. These embeddings can be pre-computed and cached, then used at inference time with text prompts for fast segmentation.
 
 ## Overview
 
-SAM 3 generates two types of embeddings:
+SAM 3 generates multi-scale visual embeddings from images:
 
-1. **Text Embeddings** (256-dimensional):
-   - Token-level embeddings: One vector per word/token
-   - Pooled sentence embedding: Single vector representing the entire prompt
-   - Generated from the TextTransformer encoder
+**Image Embeddings** (256-dimensional):
+- Multi-scale feature pyramids from images
+- 4 scales: 4x, 2x, 1x, 0.5x resolution
+- Generated from the ViT backbone with position encodings
+- Can be pre-computed and saved for later use
+- At inference time, combine with text prompts for segmentation
 
-2. **Visual Embeddings** (256-dimensional):
-   - Multi-scale feature pyramids from images
-   - 4 scales: 4x, 2x, 1x, 0.5x resolution
-   - Generated from the ViT backbone with position encodings
-
-3. **Combined Embeddings**:
-   - Fused text and visual features
-   - Includes detection results (masks, boxes, scores)
+**Workflow**:
+1. **Pre-processing** (this tool): Extract and save image embeddings
+2. **Inference time**: Load saved embeddings + encode text prompts → fast segmentation
 
 ## Quick Start
 
@@ -57,16 +54,14 @@ SAM 3 generates two types of embeddings:
 The `run_embedding_extraction.sh` script simplifies running the Docker container.
 
 ```bash
-# Extract text embeddings only
-./run_embedding_extraction.sh --text "person in red shirt" --output text_embeddings.npz
-
-# Extract visual embeddings only
+# Extract embeddings from a single image
 # (first place your image in ./input/ directory)
 cp /path/to/your/photo.jpg ./input/
-./run_embedding_extraction.sh --image photo.jpg --output visual_embeddings.npz
+./run_embedding_extraction.sh --image photo.jpg --output image_embeddings.npz
 
-# Extract combined embeddings (text + visual + detections)
-./run_embedding_extraction.sh --image photo.jpg --text "person" --output combined_embeddings.npz
+# Process an entire directory of images (batch mode)
+cp -r /path/to/your/images/* ./input/
+./run_embedding_extraction.sh --image-dir ./input/ --output-dir ./output/
 ```
 
 ### Option 2: Using Docker Directly
@@ -75,32 +70,23 @@ cp /path/to/your/photo.jpg ./input/
 # Create directories
 mkdir -p input output cache/huggingface cache/torch
 
-# Extract text embeddings
+# Extract embeddings from a single image
 docker run --rm --gpus all \
   -v $(pwd)/input:/workspace/input:ro \
   -v $(pwd)/output:/workspace/output:rw \
   -v $(pwd)/cache/huggingface:/workspace/.cache/huggingface:rw \
   -e HUGGING_FACE_HUB_TOKEN="${HUGGING_FACE_HUB_TOKEN}" \
   sam3-embeddings:latest \
-  --text "person" --output /workspace/output/text_emb.npz
+  --image /workspace/input/photo.jpg --output /workspace/output/image_embeddings.npz
 
-# Extract visual embeddings
+# Process a directory of images (batch mode)
 docker run --rm --gpus all \
   -v $(pwd)/input:/workspace/input:ro \
   -v $(pwd)/output:/workspace/output:rw \
   -v $(pwd)/cache/huggingface:/workspace/.cache/huggingface:rw \
   -e HUGGING_FACE_HUB_TOKEN="${HUGGING_FACE_HUB_TOKEN}" \
   sam3-embeddings:latest \
-  --image /workspace/input/photo.jpg --output /workspace/output/visual_emb.npz
-
-# Extract combined embeddings
-docker run --rm --gpus all \
-  -v $(pwd)/input:/workspace/input:ro \
-  -v $(pwd)/output:/workspace/output:rw \
-  -v $(pwd)/cache/huggingface:/workspace/.cache/huggingface:rw \
-  -e HUGGING_FACE_HUB_TOKEN="${HUGGING_FACE_HUB_TOKEN}" \
-  sam3-embeddings:latest \
-  --image /workspace/input/photo.jpg --text "person" --output /workspace/output/combined_emb.npz
+  --image-dir /workspace/input --output-dir /workspace/output
 ```
 
 ### Option 3: Using Docker Compose
@@ -108,7 +94,11 @@ docker run --rm --gpus all \
 ```bash
 # Extract embeddings using docker-compose
 docker-compose -f docker-compose.embeddings.yml run sam3-embeddings \
-  --image /workspace/input/photo.jpg --text "person" --output /workspace/output/embeddings.npz
+  --image /workspace/input/photo.jpg --output /workspace/output/embeddings.npz
+
+# Batch process images
+docker-compose -f docker-compose.embeddings.yml run sam3-embeddings \
+  --image-dir /workspace/input --output-dir /workspace/output
 ```
 
 ### Option 4: Running Without Docker (Native)
@@ -119,52 +109,72 @@ If you have the environment set up locally:
 # Install SAM3
 pip install -e .
 
-# Run the extraction script
-python extract_embeddings.py --text "person" --output text_embeddings.npz
-python extract_embeddings.py --image photo.jpg --output visual_embeddings.npz
-python extract_embeddings.py --image photo.jpg --text "person" --output combined_embeddings.npz
+# Run the extraction script on a single image
+python extract_embeddings.py --image photo.jpg --output image_embeddings.npz
+
+# Batch process a directory
+python extract_embeddings.py --image-dir ./images/ --output-dir ./embeddings/
 ```
 
 ## Output Format
 
 Embeddings are saved in NumPy's `.npz` format (compressed) or PyTorch's `.pt` format.
 
-### Text Embeddings Only
+### Image Embeddings
 
 ```python
 import numpy as np
 
-data = np.load("text_embeddings.npz", allow_pickle=True)
-text_tokens = data["text_tokens"]  # Shape: [1, seq_len, 256]
-text_pooled = data["text_pooled"]  # Shape: [1, 256]
-text_prompt = str(data["text_prompt"])
-```
+# Load the saved embeddings
+data = np.load("image_embeddings.npz", allow_pickle=True)
 
-### Visual Embeddings Only
-
-```python
-import numpy as np
-
-data = np.load("visual_embeddings.npz", allow_pickle=True)
+# Extract the components
 vision_features = data["vision_features"]  # List of multi-scale features
 vision_pos_enc = data["vision_pos_enc"]    # Position encodings
-image_size = tuple(data["image_size"])      # (width, height)
+image_size = tuple(data["image_size"])     # (width, height)
+image_path = str(data["image_path"])       # Original image path
 
-# Each scale has shape: [1, H, W, 256]
+# Inspect the multi-scale features
+# Each scale has shape: [1, C, H, W] where C=256
 for i, feat in enumerate(vision_features):
     print(f"Scale {i}: {feat.shape}")
+
+# Example output:
+# Scale 0: (1, 256, 252, 252)  # 4x resolution
+# Scale 1: (1, 256, 126, 126)  # 2x resolution
+# Scale 2: (1, 256, 63, 63)    # 1x resolution
+# Scale 3: (1, 256, 31, 31)    # 0.5x resolution
 ```
 
-### Combined Embeddings
+### Using Saved Embeddings at Inference Time
 
 ```python
 import numpy as np
+import torch
+from sam3.model_builder import build_sam3_image_model
+from sam3.model.sam3_image_processor import Sam3Processor
 
-data = np.load("combined_embeddings.npz", allow_pickle=True)
-masks = data["masks"]      # Shape: [num_detections, H, W]
-boxes = data["boxes"]      # Shape: [num_detections, 4]
-scores = data["scores"]    # Shape: [num_detections]
-vision_features = data["vision_features"]  # Multi-scale features
+# Load pre-computed image embeddings
+data = np.load("image_embeddings.npz", allow_pickle=True)
+vision_features = [torch.from_numpy(f).cuda() for f in data["vision_features"]]
+vision_pos_enc = [torch.from_numpy(p).cuda() for p in data["vision_pos_enc"]]
+
+# Build model
+model = build_sam3_image_model()
+processor = Sam3Processor(model)
+
+# Create inference state from saved embeddings
+inference_state = {
+    "vision_features": vision_features,
+    "vision_pos_enc": vision_pos_enc,
+    "image_size": tuple(data["image_size"]),
+}
+
+# Now use text prompts at inference time (fast!)
+output = processor.set_text_prompt(state=inference_state, prompt="person in red shirt")
+masks = output["masks"]
+boxes = output["boxes"]
+scores = output["scores"]
 ```
 
 ## Advanced Usage
@@ -188,8 +198,8 @@ If you don't have a GPU (not recommended, very slow):
 ```bash
 python extract_embeddings.py \
   --device cpu \
-  --text "person" \
-  --output text_embeddings.npz
+  --image photo.jpg \
+  --output image_embeddings.npz
 ```
 
 ### Save as PyTorch Format
@@ -197,7 +207,6 @@ python extract_embeddings.py \
 ```bash
 ./run_embedding_extraction.sh \
   --image photo.jpg \
-  --text "person" \
   --output embeddings.pt
 ```
 
@@ -243,11 +252,19 @@ sam3/
 
 - **First run**: Downloads ~3GB of model checkpoints (takes 5-15 minutes)
 - **Subsequent runs**: Uses cached checkpoints (takes 10-30 seconds per image)
+- **Batch processing**: ~5-10 images per minute on a modern GPU
 - **GPU memory**: Requires ~8GB VRAM for inference
-- **Embedding file sizes**:
-  - Text only: <1 MB
-  - Visual only: 50-200 MB (depends on image size)
-  - Combined: 50-200 MB
+- **Embedding file sizes**: 50-200 MB per image (depends on image size)
+  - Larger images → larger embeddings
+  - Multi-scale features stored for all 4 pyramid levels
+
+## Benefits of Pre-computing Image Embeddings
+
+1. **Faster inference**: Skip image encoding at inference time
+2. **Flexible text prompts**: Try different text prompts on the same image instantly
+3. **Caching**: Process images once, reuse embeddings many times
+4. **Batch processing**: Extract embeddings for entire datasets offline
+5. **Cost optimization**: Separate expensive image encoding from fast text-based queries
 
 ## Citation
 

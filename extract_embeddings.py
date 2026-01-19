@@ -2,74 +2,37 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates. All Rights Reserved
 
 """
-SAM 3 Embedding Extraction Script
+SAM 3 Image Embedding Extraction Script
 
-This script extracts text and visual embeddings from the SAM 3 model.
-Text embeddings: 256-dimensional vectors from natural language prompts
+This script extracts visual embeddings from images using the SAM 3 model.
 Visual embeddings: Multi-scale 256-dimensional feature pyramids from images
 
+The extracted embeddings can be used later at inference time with text prompts.
+
 Usage:
-    python extract_embeddings.py --image path/to/image.jpg --text "your prompt" --output embeddings.npz
-    python extract_embeddings.py --text "person" --output text_embeddings.npz
-    python extract_embeddings.py --image path/to/image.jpg --output visual_embeddings.npz
+    python extract_embeddings.py --image path/to/image.jpg --output image_embeddings.npz
+    python extract_embeddings.py --image-dir /path/to/images/ --output-dir ./embeddings/
 """
 
 import argparse
 import os
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List
 
 import numpy as np
 import torch
 from PIL import Image
+from tqdm import tqdm
 
 from sam3.model_builder import build_sam3_image_model
 from sam3.model.sam3_image_processor import Sam3Processor
 
 
-def extract_text_embeddings(
-    model: torch.nn.Module,
-    text_prompt: str,
-    device: str = "cuda"
-) -> Dict[str, np.ndarray]:
-    """
-    Extract text embeddings from a text prompt.
-
-    Args:
-        model: SAM3 model
-        text_prompt: Text description (e.g., "person in red shirt")
-        device: Device to run on
-
-    Returns:
-        Dictionary containing text embeddings
-    """
-    print(f"Extracting text embeddings for prompt: '{text_prompt}'")
-
-    # Get the text encoder from the backbone
-    text_encoder = model.backbone.text
-
-    # Tokenize and encode the text
-    with torch.no_grad():
-        text_output = text_encoder(text_prompt)
-        text_tokens = text_output["text_tokens"]  # Shape: [batch, seq_len, 256]
-        text_pooled = text_output["text_pooled"]  # Shape: [batch, 256]
-
-    embeddings = {
-        "text_tokens": text_tokens.cpu().numpy(),  # Token-level embeddings
-        "text_pooled": text_pooled.cpu().numpy(),  # Pooled sentence embedding
-        "text_prompt": text_prompt,
-    }
-
-    print(f"  Text tokens shape: {embeddings['text_tokens'].shape}")
-    print(f"  Text pooled shape: {embeddings['text_pooled'].shape}")
-
-    return embeddings
-
-
-def extract_visual_embeddings(
+def extract_image_embeddings(
     model: torch.nn.Module,
     image_path: str,
-    device: str = "cuda"
+    device: str = "cuda",
+    verbose: bool = True
 ) -> Dict[str, np.ndarray]:
     """
     Extract visual embeddings from an image.
@@ -78,15 +41,18 @@ def extract_visual_embeddings(
         model: SAM3 model
         image_path: Path to input image
         device: Device to run on
+        verbose: Print extraction details
 
     Returns:
-        Dictionary containing multi-scale visual embeddings
+        Dictionary containing multi-scale visual embeddings and metadata
     """
-    print(f"Extracting visual embeddings from: {image_path}")
+    if verbose:
+        print(f"Extracting image embeddings from: {image_path}")
 
     # Load and preprocess image
     image = Image.open(image_path).convert("RGB")
-    print(f"  Image size: {image.size}")
+    if verbose:
+        print(f"  Image size: {image.size}")
 
     # Get processor
     processor = Sam3Processor(model)
@@ -102,67 +68,71 @@ def extract_visual_embeddings(
     embeddings = {
         "vision_features": [feat.cpu().numpy() for feat in vision_features],
         "vision_pos_enc": [pos.cpu().numpy() for pos in vision_pos_enc],
-        "image_size": image.size,
+        "image_size": np.array(image.size),  # (width, height)
+        "image_path": str(image_path),
     }
 
-    print(f"  Number of feature scales: {len(embeddings['vision_features'])}")
-    for i, feat in enumerate(embeddings['vision_features']):
-        print(f"  Scale {i} shape: {feat.shape}")
+    if verbose:
+        print(f"  Number of feature scales: {len(embeddings['vision_features'])}")
+        for i, feat in enumerate(embeddings['vision_features']):
+            print(f"    Scale {i}: {feat.shape}")
 
     return embeddings
 
 
-def extract_combined_embeddings(
+def process_image_directory(
     model: torch.nn.Module,
-    image_path: str,
-    text_prompt: str,
-    device: str = "cuda"
-) -> Dict[str, np.ndarray]:
+    image_dir: Path,
+    output_dir: Path,
+    device: str = "cuda",
+    image_extensions: List[str] = [".jpg", ".jpeg", ".png", ".bmp", ".tiff"]
+) -> int:
     """
-    Extract combined text and visual embeddings after fusion.
+    Process all images in a directory and save embeddings.
 
     Args:
         model: SAM3 model
-        image_path: Path to input image
-        text_prompt: Text description
+        image_dir: Directory containing images
+        output_dir: Directory to save embeddings
         device: Device to run on
+        image_extensions: List of valid image extensions
 
     Returns:
-        Dictionary containing all embeddings (text, visual, and fused)
+        Number of images processed
     """
-    print(f"Extracting combined embeddings:")
-    print(f"  Image: {image_path}")
-    print(f"  Text: '{text_prompt}'")
+    # Find all images
+    image_files = []
+    for ext in image_extensions:
+        image_files.extend(image_dir.glob(f"*{ext}"))
+        image_files.extend(image_dir.glob(f"*{ext.upper()}"))
 
-    # Load image
-    image = Image.open(image_path).convert("RGB")
+    if not image_files:
+        print(f"No images found in {image_dir}")
+        return 0
 
-    # Get processor
-    processor = Sam3Processor(model)
+    print(f"Found {len(image_files)} images in {image_dir}")
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Process image with text prompt
-    with torch.no_grad():
-        inference_state = processor.set_image(image)
-        output = processor.set_text_prompt(state=inference_state, prompt=text_prompt)
+    # Process each image
+    for image_path in tqdm(image_files, desc="Processing images"):
+        try:
+            # Extract embeddings
+            embeddings = extract_image_embeddings(
+                model, image_path, device, verbose=False
+            )
 
-    embeddings = {
-        "text_prompt": text_prompt,
-        "image_size": image.size,
-        "vision_features": [feat.cpu().numpy() for feat in inference_state["vision_features"]],
-        "masks": output["masks"].cpu().numpy(),
-        "boxes": output["boxes"].cpu().numpy(),
-        "scores": output["scores"].cpu().numpy(),
-    }
+            # Save with same name but .npz extension
+            output_path = output_dir / f"{image_path.stem}_embeddings.npz"
+            save_embeddings(embeddings, output_path, verbose=False)
 
-    print(f"  Found {len(output['scores'])} detections")
-    print(f"  Masks shape: {embeddings['masks'].shape}")
-    print(f"  Boxes shape: {embeddings['boxes'].shape}")
-    print(f"  Scores shape: {embeddings['scores'].shape}")
+        except Exception as e:
+            print(f"\nError processing {image_path}: {e}")
+            continue
 
-    return embeddings
+    return len(image_files)
 
 
-def save_embeddings(embeddings: Dict, output_path: str):
+def save_embeddings(embeddings: Dict, output_path: str, verbose: bool = True):
     """Save embeddings to a file."""
     output_path = Path(output_path)
 
@@ -183,57 +153,67 @@ def save_embeddings(embeddings: Dict, output_path: str):
     # Save based on extension
     if output_path.suffix == ".npz":
         np.savez_compressed(output_path, **save_dict)
-        print(f"\nEmbeddings saved to: {output_path}")
     elif output_path.suffix == ".pt":
         torch.save(embeddings, output_path)
-        print(f"\nEmbeddings saved to: {output_path}")
+        output_path = output_path  # Keep the .pt extension
     else:
         # Default to npz
         output_path = output_path.with_suffix(".npz")
         np.savez_compressed(output_path, **save_dict)
-        print(f"\nEmbeddings saved to: {output_path}")
 
-    # Print file size
-    file_size_mb = output_path.stat().st_size / (1024 * 1024)
-    print(f"File size: {file_size_mb:.2f} MB")
+    if verbose:
+        print(f"\nEmbeddings saved to: {output_path}")
+        # Print file size
+        file_size_mb = output_path.stat().st_size / (1024 * 1024)
+        print(f"File size: {file_size_mb:.2f} MB")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Extract embeddings from SAM 3 model",
+        description="Extract image embeddings from SAM 3 model",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Extract text embeddings only
-  python extract_embeddings.py --text "person" --output text_emb.npz
+  # Extract embeddings from a single image
+  python extract_embeddings.py --image photo.jpg --output embeddings.npz
 
-  # Extract visual embeddings only
-  python extract_embeddings.py --image photo.jpg --output visual_emb.npz
-
-  # Extract combined embeddings (text + visual + detections)
-  python extract_embeddings.py --image photo.jpg --text "person" --output combined_emb.npz
+  # Process all images in a directory
+  python extract_embeddings.py --image-dir ./images/ --output-dir ./embeddings/
 
   # Save as PyTorch file
-  python extract_embeddings.py --image photo.jpg --text "person" --output embeddings.pt
+  python extract_embeddings.py --image photo.jpg --output embeddings.pt
+
+  # Use CPU instead of GPU
+  python extract_embeddings.py --image photo.jpg --output embeddings.npz --device cpu
         """
     )
 
-    parser.add_argument(
+    # Input options (mutually exclusive)
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument(
         "--image",
         type=str,
-        help="Path to input image"
+        help="Path to a single input image"
     )
-    parser.add_argument(
-        "--text",
+    input_group.add_argument(
+        "--image-dir",
         type=str,
-        help="Text prompt for embedding extraction"
+        help="Path to directory containing images (batch processing)"
     )
+
+    # Output options
     parser.add_argument(
         "--output",
         type=str,
-        required=True,
-        help="Output file path (.npz or .pt)"
+        help="Output file path for single image (.npz or .pt)"
     )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        help="Output directory for batch processing"
+    )
+
+    # Model options
     parser.add_argument(
         "--device",
         type=str,
@@ -250,11 +230,14 @@ Examples:
     args = parser.parse_args()
 
     # Validate inputs
-    if not args.image and not args.text:
-        parser.error("At least one of --image or --text must be provided")
-
+    if args.image and not args.output:
+        parser.error("--output is required when using --image")
+    if args.image_dir and not args.output_dir:
+        parser.error("--output-dir is required when using --image-dir")
     if args.image and not os.path.exists(args.image):
         parser.error(f"Image file not found: {args.image}")
+    if args.image_dir and not os.path.isdir(args.image_dir):
+        parser.error(f"Image directory not found: {args.image_dir}")
 
     # Load model
     print("="*60)
@@ -274,30 +257,32 @@ Examples:
 
     print("="*60)
 
-    # Extract embeddings based on provided inputs
+    # Extract embeddings
     try:
-        if args.image and args.text:
-            # Extract combined embeddings
-            embeddings = extract_combined_embeddings(
-                model, args.image, args.text, args.device
+        if args.image:
+            # Single image mode
+            embeddings = extract_image_embeddings(
+                model, args.image, args.device, verbose=True
             )
-        elif args.text:
-            # Extract text embeddings only
-            embeddings = extract_text_embeddings(
-                model, args.text, args.device
-            )
-        elif args.image:
-            # Extract visual embeddings only
-            embeddings = extract_visual_embeddings(
-                model, args.image, args.device
+            save_embeddings(embeddings, args.output, verbose=True)
+
+            print("="*60)
+            print("Image embedding extraction completed successfully!")
+            print("="*60)
+
+        else:
+            # Batch directory mode
+            num_processed = process_image_directory(
+                model,
+                Path(args.image_dir),
+                Path(args.output_dir),
+                args.device
             )
 
-        # Save embeddings
-        save_embeddings(embeddings, args.output)
-
-        print("="*60)
-        print("Embedding extraction completed successfully!")
-        print("="*60)
+            print("="*60)
+            print(f"Batch processing completed! Processed {num_processed} images.")
+            print(f"Embeddings saved to: {args.output_dir}")
+            print("="*60)
 
     except Exception as e:
         print(f"\nError during embedding extraction: {e}")

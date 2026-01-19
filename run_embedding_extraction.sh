@@ -54,29 +54,34 @@ if [ $# -eq 0 ]; then
     print_message "$YELLOW" "Usage: $0 [OPTIONS]"
     echo
     echo "Options:"
-    echo "  --image PATH      Path to input image (relative to ./input/ directory)"
-    echo "  --text TEXT       Text prompt for embedding extraction"
-    echo "  --output PATH     Output file path (relative to ./output/ directory)"
+    echo "  --image PATH         Path to single image (relative to ./input/ directory)"
+    echo "  --image-dir PATH     Path to directory of images (relative to ./input/ directory)"
+    echo "  --output PATH        Output file path (relative to ./output/ directory, for single image)"
+    echo "  --output-dir PATH    Output directory path (relative to ./output/ directory, for batch)"
     echo
     echo "Examples:"
-    echo "  # Extract text embeddings only"
-    echo "  $0 --text \"person\" --output text_emb.npz"
+    echo "  # Extract embeddings from a single image"
+    echo "  $0 --image photo.jpg --output image_emb.npz"
     echo
-    echo "  # Extract visual embeddings only (place image in ./input/ first)"
-    echo "  $0 --image photo.jpg --output visual_emb.npz"
-    echo
-    echo "  # Extract combined embeddings"
-    echo "  $0 --image photo.jpg --text \"person\" --output combined_emb.npz"
+    echo "  # Batch process all images in a directory"
+    echo "  $0 --image-dir ./images --output-dir ./embeddings"
     echo
     exit 0
 fi
 
 # Parse arguments and convert paths
 DOCKER_ARGS=()
-for arg in "$@"; do
-    case $arg in
+while [[ $# -gt 0 ]]; do
+    case $1 in
         --image)
             DOCKER_ARGS+=("--image")
+            shift
+            # Convert relative path to container path
+            DOCKER_ARGS+=("/workspace/input/$1")
+            shift
+            ;;
+        --image-dir)
+            DOCKER_ARGS+=("--image-dir")
             shift
             # Convert relative path to container path
             DOCKER_ARGS+=("/workspace/input/$1")
@@ -89,8 +94,15 @@ for arg in "$@"; do
             DOCKER_ARGS+=("/workspace/output/$1")
             shift
             ;;
+        --output-dir)
+            DOCKER_ARGS+=("--output-dir")
+            shift
+            # Convert relative path to container path
+            DOCKER_ARGS+=("/workspace/output/$1")
+            shift
+            ;;
         *)
-            DOCKER_ARGS+=("$arg")
+            DOCKER_ARGS+=("$1")
             shift
             ;;
     esac
