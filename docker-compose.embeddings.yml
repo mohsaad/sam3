@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  sam3-embeddings:
+    build:
+      context: .
+      dockerfile: Dockerfile.embeddings
+    image: sam3-embeddings:latest
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
+    volumes:
+      # Mount input directory for images
+      - ./input:/workspace/input:ro
+      # Mount output directory for embeddings
+      - ./output:/workspace/output:rw
+      # Mount HuggingFace cache (optional, for faster subsequent runs)
+      - ./cache/huggingface:/workspace/.cache/huggingface:rw
+      # Mount torch cache (optional)
+      - ./cache/torch:/workspace/.cache/torch:rw
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    # Override entrypoint to run custom commands
+    # Example usage in command:
+    # docker-compose -f docker-compose.embeddings.yml run sam3-embeddings --image /workspace/input/photo.jpg --text "person" --output /workspace/output/embeddings.npz
